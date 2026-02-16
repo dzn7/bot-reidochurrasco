@@ -1,0 +1,31 @@
+{
+    "name": "rei-do-churrasco-whatsapp-bot",
+    "version": "1.0.0",
+    "description": "Bot WhatsApp para notificações de pedidos - Rei do Churrasco",
+    "main": "src/index.js",
+    "type": "module",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "node --watch src/index.js"
+    },
+    "keywords": [
+        "whatsapp",
+        "bot",
+        "baileys",
+        "rei-do-churrasco"
+    ],
+    "author": "Rei do Churrasco",
+    "license": "MIT",
+    "dependencies": {
+        "@supabase/supabase-js": "^2.49.1",
+        "@whiskeysockets/baileys": "^7.0.0-rc.9",
+        "cors": "^2.8.5",
+        "dotenv": "^17.2.3",
+        "express": "^4.21.2",
+        "pino": "^9.6.0",
+        "qrcode-terminal": "^0.12.0"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}
