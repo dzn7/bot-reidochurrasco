@@ -546,16 +546,16 @@ function gerarRespostaPix(numeroRemetente) {
     const saudacao = obterSaudacao()
     const pixSelecionado = selecionarChavePixInteligente(numeroRemetente)
 
-    // Retorna array: primeira msg com info, segunda msg só com a chave para facilitar cópia
+    // Retorna array: primeira msg curta com contexto, segunda msg só com a chave para facilitar cópia
     return [
         `${saudacao}! 💰
 
-Segue nossa chave *PIX* para pagamento:
+*PIX para pagamento:*
 
 *Tipo:* ${pixSelecionado.tipo}
 *Titular:* ${pixSelecionado.titular}
 
-A chave está na próxima mensagem, é só copiar! 👇`,
+A chave vai separada abaixo para copiar 👇`,
         pixSelecionado.chave
     ]
 }

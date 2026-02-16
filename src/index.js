@@ -192,14 +192,15 @@ async function processarNovoPedido(pedido) {
             if (pedidoPagoComPix(pedido)) {
                 const chavePix = selecionarChavePixInteligente(telefoneCLiente)
 
-                const mensagemPix = `💳 *Pagamento PIX do Pedido #${numeroPedido}*\n\n` +
+                const mensagemPix = `💳 *PIX do Pedido #${numeroPedido}*\n\n` +
                     `*Tipo:* ${chavePix.tipo}\n` +
                     `*Titular:* ${chavePix.titular}\n\n` +
-                    `*Chave PIX:*\n${chavePix.chave}\n\n` +
-                    'Copie a chave acima para concluir o pagamento.'
+                    'A chave vai na próxima mensagem para você copiar.'
 
-                const enviadoPix = await enviarMensagem(telefoneCLiente, mensagemPix)
-                if (enviadoPix) {
+                const enviadoPixInfo = await enviarMensagem(telefoneCLiente, mensagemPix)
+                const enviadoPixChave = await enviarMensagem(telefoneCLiente, chavePix.chave)
+
+                if (enviadoPixInfo && enviadoPixChave) {
                     logger.info(`[BOT] ✅ Chave PIX enviada para ${telefoneCLiente} - Pedido #${numeroPedido}`)
                 } else {
                     logger.warn(`[BOT] ⚠️ Falha ao enviar chave PIX para ${telefoneCLiente} - Pedido #${numeroPedido}`)
