@@ -54,13 +54,15 @@ export function formatarTelefone(telefone) {
  * Compatível com JSONB do Rei do Churrasco (orders.items)
  */
 function formatarAdicionais(item) {
-    const adicionais = item.adicionais || item.item_adicionais || item.extras || []
+    const adicionaisBrutos = item.adicionais || item.item_adicionais || item.extras || item.complements || []
+    const adicionais = Array.isArray(adicionaisBrutos) ? adicionaisBrutos : [adicionaisBrutos]
     if (adicionais.length === 0) return ''
 
     return adicionais.map(a => {
-        const qtd = a.quantidade > 1 ? `${a.quantidade}x ` : ''
-        const nome = a.nome || a.nome_adicional || a.name || 'Adicional'
-        const preco = a.preco || a.price || 0
+        const quantidade = numeroSeguro(a?.quantidade || a?.quantity || 1)
+        const qtd = quantidade > 1 ? `${quantidade}x ` : ''
+        const nome = textoSeguro(a?.nome || a?.nome_adicional || a?.name || a?.label || a?.titulo) || 'Adicional'
+        const preco = numeroSeguro(a?.preco || a?.price || a?.valor || a?.amount || 0)
         return `      + ${qtd}${nome} (${formatarMoeda(preco)})`
     }).join('\n')
 }
@@ -68,6 +70,164 @@ function formatarAdicionais(item) {
 function numeroSeguro(valor) {
     const numero = Number(valor)
     return Number.isFinite(numero) ? numero : 0
+}
+
+function textoSeguro(valor) {
+    if (valor === null || valor === undefined) return ''
+
+    if (typeof valor === 'string') {
+        return valor.trim()
+    }
+
+    if (typeof valor === 'number' || typeof valor === 'boolean') {
+        return String(valor)
+    }
+
+    if (Array.isArray(valor)) {
+        return valor
+            .map((item) => textoSeguro(item))
+            .filter(Boolean)
+            .join(', ')
+    }
+
+    if (typeof valor === 'object') {
+        const chavesPreferidas = [
+            'label', 'nome', 'name', 'titulo', 'title',
+            'valor', 'value', 'descricao', 'description',
+            'texto', 'size', 'tamanho', 'variacao', 'variation'
+        ]
+
+        for (const chave of chavesPreferidas) {
+            const texto = textoSeguro(valor[chave])
+            if (texto) return texto
+        }
+
+        const textosPrimitivos = Object.values(valor)
+            .map((item) => {
+                if (item === null || item === undefined) return ''
+                if (typeof item === 'object') return ''
+                return textoSeguro(item)
+            })
+            .filter(Boolean)
+
+        if (textosPrimitivos.length > 0) {
+            return textosPrimitivos.join(' - ')
+        }
+    }
+
+    return ''
+}
+
+function normalizarTextoBusca(valor) {
+    return textoSeguro(valor)
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+}
+
+function obterOpcaoEntrega(pedido) {
+    const opcaoEntrega = pedido?.delivery_option
+
+    if (!opcaoEntrega) return {}
+
+    if (typeof opcaoEntrega === 'string') {
+        try {
+            const parsed = JSON.parse(opcaoEntrega)
+            if (parsed && typeof parsed === 'object') return parsed
+            return {}
+        } catch {
+            return {}
+        }
+    }
+
+    if (typeof opcaoEntrega === 'object' && !Array.isArray(opcaoEntrega)) {
+        return opcaoEntrega
+    }
+
+    return {}
+}
+
+function extrairNumeroMesa(pedido) {
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
+    const candidatos = [
+        opcaoEntrega.tableNumber,
+        opcaoEntrega.table_number,
+        opcaoEntrega.mesa,
+        opcaoEntrega.numeroMesa,
+        pedido?.tableNumber,
+        pedido?.table_number
+    ]
+
+    for (const candidato of candidatos) {
+        if (candidato === null || candidato === undefined) continue
+        const texto = String(candidato).trim()
+        if (!texto || texto === '0' || texto.toLowerCase() === 'null' || texto.toLowerCase() === 'undefined') {
+            continue
+        }
+        return texto
+    }
+
+    return ''
+}
+
+function obterContextoEntrega(pedido) {
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
+    const tipoOpcao = normalizarTextoBusca(opcaoEntrega.type || opcaoEntrega.tipo || opcaoEntrega.deliveryType)
+    const tipoPedido = normalizarTextoBusca(pedido.order_type || pedido.tipo_entrega)
+    const numeroMesa = extrairNumeroMesa(pedido)
+
+    const indicaRetirada =
+        tipoOpcao.includes('retirada') ||
+        tipoOpcao.includes('takeout') ||
+        tipoOpcao.includes('pickup') ||
+        tipoOpcao.includes('balcao') ||
+        tipoPedido === 'retirada' ||
+        tipoPedido === 'takeout' ||
+        tipoPedido === 'pickup'
+
+    const indicaLocal =
+        Boolean(numeroMesa) ||
+        tipoOpcao.includes('no local') ||
+        tipoOpcao.includes('consumo no local') ||
+        tipoOpcao.includes('consumo') ||
+        tipoOpcao.includes('mesa') ||
+        tipoPedido === 'local' ||
+        tipoPedido === 'dine_in' ||
+        tipoPedido === 'mesa'
+
+    const indicaDelivery =
+        tipoOpcao.includes('delivery') ||
+        tipoOpcao.includes('entrega') ||
+        tipoPedido === 'delivery' ||
+        tipoPedido === 'entrega'
+
+    if (numeroMesa) {
+        return { tipo: 'local', numeroMesa }
+    }
+
+    if (indicaRetirada) {
+        return { tipo: 'retirada', numeroMesa: '' }
+    }
+
+    if (indicaLocal) {
+        return { tipo: 'local', numeroMesa: '' }
+    }
+
+    if (indicaDelivery) {
+        return { tipo: 'delivery', numeroMesa: '' }
+    }
+
+    // Fallback seguro para dados inconsistentes
+    const enderecoDireto = textoSeguro(pedido.customer_address)
+    if (enderecoDireto) {
+        return { tipo: 'delivery', numeroMesa: '' }
+    }
+
+    return { tipo: 'retirada', numeroMesa: '' }
+}
+
+export function pedidoEhDelivery(pedido) {
+    return obterContextoEntrega(pedido).tipo === 'delivery'
 }
 
 /**
@@ -99,25 +259,36 @@ function formatarResumoDesconto(pedido) {
  */
 function extrairEnderecoCompleto(pedido) {
     // Tenta extrair do campo direto
-    if (pedido.customer_address) {
-        return pedido.customer_address
+    const enderecoDireto = textoSeguro(pedido.customer_address)
+    if (enderecoDireto) {
+        return enderecoDireto
     }
 
     // Tenta extrair do delivery_option (JSONB)
-    const opcaoEntrega = pedido.delivery_option
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
     if (opcaoEntrega) {
         const partes = []
-        if (opcaoEntrega.endereco || opcaoEntrega.address) {
-            partes.push(opcaoEntrega.endereco || opcaoEntrega.address)
+        const enderecoBase = textoSeguro(
+            opcaoEntrega.endereco ||
+            opcaoEntrega.address ||
+            opcaoEntrega.logradouro ||
+            opcaoEntrega.street
+        )
+
+        if (enderecoBase) {
+            partes.push(enderecoBase)
         }
-        if (opcaoEntrega.bairro || opcaoEntrega.neighborhood) {
-            partes.push(opcaoEntrega.bairro || opcaoEntrega.neighborhood)
+        const bairro = textoSeguro(opcaoEntrega.bairro || opcaoEntrega.neighborhood)
+        if (bairro) {
+            partes.push(bairro)
         }
-        if (opcaoEntrega.complemento || opcaoEntrega.complement) {
-            partes.push(opcaoEntrega.complemento || opcaoEntrega.complement)
+        const complemento = textoSeguro(opcaoEntrega.complemento || opcaoEntrega.complement)
+        if (complemento) {
+            partes.push(complemento)
         }
-        if (opcaoEntrega.referencia || opcaoEntrega.reference) {
-            partes.push(`Ref: ${opcaoEntrega.referencia || opcaoEntrega.reference}`)
+        const referencia = textoSeguro(opcaoEntrega.referencia || opcaoEntrega.reference)
+        if (referencia) {
+            partes.push(`Ref: ${referencia}`)
         }
         if (partes.length > 0) return partes.join(', ')
     }
@@ -129,10 +300,11 @@ function extrairEnderecoCompleto(pedido) {
  * Extrai bairro do pedido
  */
 function extrairBairro(pedido) {
-    if (pedido.bairro) return pedido.bairro
-    const opcaoEntrega = pedido.delivery_option
+    const bairroDireto = textoSeguro(pedido.bairro)
+    if (bairroDireto) return bairroDireto
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
     if (opcaoEntrega) {
-        return opcaoEntrega.bairro || opcaoEntrega.neighborhood || ''
+        return textoSeguro(opcaoEntrega.bairro || opcaoEntrega.neighborhood || '')
     }
     return ''
 }
@@ -141,10 +313,11 @@ function extrairBairro(pedido) {
  * Extrai complemento do pedido
  */
 function extrairComplemento(pedido) {
-    if (pedido.complemento) return pedido.complemento
-    const opcaoEntrega = pedido.delivery_option
+    const complementoDireto = textoSeguro(pedido.complemento)
+    if (complementoDireto) return complementoDireto
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
     if (opcaoEntrega) {
-        return opcaoEntrega.complemento || opcaoEntrega.complement || ''
+        return textoSeguro(opcaoEntrega.complemento || opcaoEntrega.complement || '')
     }
     return ''
 }
@@ -153,10 +326,11 @@ function extrairComplemento(pedido) {
  * Extrai referência do pedido
  */
 function extrairReferencia(pedido) {
-    if (pedido.referencia) return pedido.referencia
-    const opcaoEntrega = pedido.delivery_option
+    const referenciaDireta = textoSeguro(pedido.referencia)
+    if (referenciaDireta) return referenciaDireta
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
     if (opcaoEntrega) {
-        return opcaoEntrega.referencia || opcaoEntrega.reference || ''
+        return textoSeguro(opcaoEntrega.referencia || opcaoEntrega.reference || '')
     }
     return ''
 }
@@ -166,7 +340,7 @@ function extrairReferencia(pedido) {
  */
 function extrairTaxaEntrega(pedido) {
     if (pedido.taxa_entrega) return numeroSeguro(pedido.taxa_entrega)
-    const opcaoEntrega = pedido.delivery_option
+    const opcaoEntrega = obterOpcaoEntrega(pedido)
     if (opcaoEntrega) {
         return numeroSeguro(opcaoEntrega.taxa || opcaoEntrega.fee || opcaoEntrega.delivery_fee || 0)
     }
@@ -178,12 +352,24 @@ function extrairTaxaEntrega(pedido) {
  */
 function formatarItensPedido(pedido, incluirPreco = true) {
     // Items pode vir como array JSONB diretamente
-    const itens = pedido.items || pedido.itens_pedido || []
+    const itensBrutos = pedido.items || pedido.itens_pedido || []
+    const itens = Array.isArray(itensBrutos) ? itensBrutos : []
+
+    if (itens.length === 0) {
+        return '   • Itens não informados'
+    }
 
     return itens.map(item => {
-        const quantidade = item.quantidade || item.quantity || 1
-        const nome = item.nome || item.nome_item || item.name || item.product_name || 'Item'
-        const preco = item.subtotal || item.preco_total || item.total || (item.preco_unitario || item.price || 0) * quantidade
+        const quantidade = numeroSeguro(item.quantidade || item.quantity || 1)
+        const nome = textoSeguro(item.nome || item.nome_item || item.name || item.product_name) || 'Item'
+        const precoUnitario = numeroSeguro(item.preco_unitario || item.price || item.preco || item.basePrice || 0)
+        const preco = numeroSeguro(
+            item.totalItemPrice ||
+            item.subtotal ||
+            item.preco_total ||
+            item.total ||
+            (precoUnitario * quantidade)
+        )
         let linha = incluirPreco
             ? `   • ${quantidade}x ${nome} - ${formatarMoeda(preco)}`
             : `   • ${quantidade}x ${nome}`
@@ -191,11 +377,19 @@ function formatarItensPedido(pedido, incluirPreco = true) {
         const adicionaisTexto = formatarAdicionais(item)
         if (adicionaisTexto) linha += '\n' + adicionaisTexto
 
-        const obs = item.observacoes || item.observations || item.notes || ''
+        const obs = textoSeguro(item.observacoes || item.observations || item.notes || item.observacao)
         if (obs) linha += `\n      📝 _${obs}_`
 
         // Variação/tamanho do item (ex: "Marmita Grande")
-        const variacao = item.variacao || item.variation || item.tamanho || item.size || ''
+        const variacao = textoSeguro(
+            item.variacao ||
+            item.variation ||
+            item.tamanho ||
+            item.size ||
+            item.opcao ||
+            item.option ||
+            item.selectedOption
+        )
         if (variacao) linha += `\n      📏 _${variacao}_`
 
         return linha
@@ -211,18 +405,19 @@ export function gerarMensagemPedidoRecebido(pedido) {
     const complemento = extrairComplemento(pedido)
     const referencia = extrairReferencia(pedido)
     const taxaEntrega = extrairTaxaEntrega(pedido)
+    const contextoEntrega = obterContextoEntrega(pedido)
 
     let tipoEntrega = '🏪 Retirada no balcão'
     let infoEntrega = ''
 
-    const orderType = pedido.order_type || pedido.tipo_entrega || ''
-
-    if (orderType === 'delivery' || orderType === 'entrega') {
+    if (contextoEntrega.tipo === 'delivery') {
         tipoEntrega = '🛵 Delivery'
         const enderecoCompleto = extrairEnderecoCompleto(pedido)
         infoEntrega = `\n\n*📍 Endereço:*\n${enderecoCompleto}${bairro ? `\n*Bairro:* ${bairro}` : ''}${complemento ? `\n*Complemento:* ${complemento}` : ''}${referencia ? `\n*Referência:* ${referencia}` : ''}`
-    } else if (orderType === 'local' || orderType === 'dine_in' || pedido.table_id) {
-        tipoEntrega = pedido.table_id ? `🍽️ Mesa (${pedido.table_id})` : '🍽️ Consumo no local'
+    } else if (contextoEntrega.tipo === 'local') {
+        tipoEntrega = contextoEntrega.numeroMesa
+            ? `🍽️ Mesa (${contextoEntrega.numeroMesa})`
+            : '🍽️ Consumo no local'
     }
 
     const formaPagamento = traduzirFormaPagamento(pedido.payment_method || pedido.forma_pagamento)
@@ -268,19 +463,20 @@ ${pedido.notes ? `\n*📝 Observações:* ${pedido.notes}` : ''}
 export function gerarMensagemCliente(pedido) {
     const listaItens = formatarItensPedido(pedido, false)
     const taxaEntrega = extrairTaxaEntrega(pedido)
+    const contextoEntrega = obterContextoEntrega(pedido)
 
     let tipoEntrega = '🏪 Retirada no balcão'
     let infoEntregaCliente = ''
 
-    const orderType = pedido.order_type || pedido.tipo_entrega || ''
-
-    if (orderType === 'delivery' || orderType === 'entrega') {
+    if (contextoEntrega.tipo === 'delivery') {
         tipoEntrega = '🛵 Delivery'
         const enderecoCompleto = extrairEnderecoCompleto(pedido)
         infoEntregaCliente = `\n\n📍 *Entregar em:*\n${enderecoCompleto}`
-    } else if (orderType === 'local' || orderType === 'dine_in' || pedido.table_id) {
-        tipoEntrega = pedido.table_id ? `🍽️ Mesa (${pedido.table_id})` : '🍽️ Consumo no local'
-    } else if (orderType === 'takeout' || orderType === 'retirada') {
+    } else if (contextoEntrega.tipo === 'local') {
+        tipoEntrega = contextoEntrega.numeroMesa
+            ? `🍽️ Mesa (${contextoEntrega.numeroMesa})`
+            : '🍽️ Consumo no local'
+    } else if (contextoEntrega.tipo === 'retirada') {
         tipoEntrega = '🏪 Retirada no balcão'
         infoEntregaCliente = `\n\n📍 *Local de retirada:*\n${CONFIG_LOJA.localizacao.rua}\n🗺️ ${CONFIG_LOJA.localizacao.mapsLink}`
     }
@@ -404,14 +600,18 @@ export function gerarMensagemStatusAtualizado(pedido, novoStatus) {
     const emoji = statusEmojis[novoStatus] || '📋'
     const texto = statusTextos[novoStatus] || novoStatus
 
-    const orderType = pedido.order_type || pedido.tipo_entrega || ''
+    const contextoEntrega = obterContextoEntrega(pedido)
 
     let mensagemExtra = ''
     if (novoStatus === 'preparing' || novoStatus === 'preparando') {
         mensagemExtra = '\n\nEstamos preparando com carinho! 🔥🥩'
     } else if (novoStatus === 'ready' || novoStatus === 'pronto') {
-        if (orderType === 'takeout' || orderType === 'retirada') {
+        if (contextoEntrega.tipo === 'retirada') {
             mensagemExtra = `\n\nPedido pronto para retirada!\n\n📍 *Local:*\n${CONFIG_LOJA.localizacao.rua}\n🗺️ ${CONFIG_LOJA.localizacao.mapsLink}`
+        } else if (contextoEntrega.tipo === 'local') {
+            mensagemExtra = contextoEntrega.numeroMesa
+                ? `\n\nPedido pronto para consumo na Mesa ${contextoEntrega.numeroMesa}!`
+                : '\n\nPedido pronto para consumo no local!'
         } else {
             mensagemExtra = '\n\nPedido pronto para retirada/entrega!'
         }
@@ -457,6 +657,7 @@ export default {
     gerarMensagemCliente,
     gerarMensagemStatusAtualizado,
     gerarMensagemEntregador,
+    pedidoEhDelivery,
     formatarMoeda,
     CONFIG_LOJA
 }

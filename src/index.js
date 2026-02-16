@@ -26,7 +26,8 @@ import {
     gerarMensagemPedidoRecebido,
     gerarMensagemStatusAtualizado,
     gerarMensagemEntregador,
-    gerarMensagemCliente
+    gerarMensagemCliente,
+    pedidoEhDelivery
 } from './lib/mensagens.js'
 import { processarMensagemRecebida } from './lib/respostasAutomaticas.js'
 
@@ -165,7 +166,6 @@ async function enviarMensagem(telefone, mensagem) {
 async function processarNovoPedido(pedido) {
     const telefoneCLiente = pedido.customer_phone || pedido.telefone
     const numeroPedido = pedido.order_number || pedido.id?.slice(0, 8)
-    const orderType = pedido.order_type || pedido.tipo_entrega || ''
 
     // 1. Envia confirmação para o CLIENTE (prioridade)
     if (telefoneCLiente) {
@@ -189,7 +189,7 @@ async function processarNovoPedido(pedido) {
     }
 
     // 3. Se for delivery, envia notificação para TODOS os entregadores ativos
-    if (orderType === 'delivery' || orderType === 'entrega') {
+    if (pedidoEhDelivery(pedido)) {
         const entregadores = await obterEntregadores()
 
         if (entregadores.length === 0) {
@@ -628,6 +628,28 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// Compatibilidade de rotas antigas:
+// - Aceita prefixo /api/*
+// - Aceita /qrcode como alias de /qr
+app.use((req, res, next) => {
+    const [caminhoOriginal, queryString] = req.url.split('?')
+    let caminhoNormalizado = caminhoOriginal
+
+    if (caminhoNormalizado.startsWith('/api/')) {
+        caminhoNormalizado = caminhoNormalizado.replace(/^\/api/, '')
+    }
+
+    if (caminhoNormalizado === '/qrcode') {
+        caminhoNormalizado = '/qr'
+    }
+
+    if (caminhoNormalizado !== caminhoOriginal) {
+        req.url = queryString ? `${caminhoNormalizado}?${queryString}` : caminhoNormalizado
+    }
+
+    next()
+})
+
 // Health check
 app.get('/', (req, res) => {
     res.json({
@@ -670,11 +692,89 @@ app.get('/status', async (req, res) => {
 // Retorna QR code
 app.get('/qr', (req, res) => {
     if (statusConexao === 'conectado') {
-        res.json({ sucesso: true, status: 'conectado', message: 'Bot já está conectado' })
+        res.json({
+            sucesso: true,
+            status: 'conectado',
+            temQrCode: false,
+            qrCode: null,
+            message: 'Bot já está conectado'
+        })
     } else if (qrCodeAtual) {
-        res.json({ sucesso: true, status: 'aguardando_qr', qrCode: qrCodeAtual })
+        res.json({
+            sucesso: true,
+            status: 'aguardando_qr',
+            temQrCode: true,
+            qrCode: qrCodeAtual
+        })
     } else {
-        res.json({ sucesso: false, status: statusConexao, message: 'QR code não disponível' })
+        res.json({
+            sucesso: false,
+            status: statusConexao,
+            temQrCode: false,
+            qrCode: null,
+            message: 'QR code não disponível'
+        })
+    }
+})
+
+// Pareamento por número (pairing code)
+app.post('/parear-numero', async (req, res) => {
+    try {
+        const numeroBruto = req.body?.numero
+        const numeroLimpo = String(numeroBruto || '').replace(/\D/g, '')
+
+        if (!numeroLimpo) {
+            return res.status(400).json({ sucesso: false, erro: 'Número é obrigatório' })
+        }
+
+        if (numeroLimpo.length < 12 || numeroLimpo.length > 15) {
+            return res.status(400).json({
+                sucesso: false,
+                erro: 'Número inválido. Use formato internacional com DDI e DDD (ex: 5586981319596)'
+            })
+        }
+
+        if (!sock) {
+            return res.status(503).json({
+                sucesso: false,
+                erro: 'Socket do WhatsApp indisponível. Tente reconectar o bot.'
+            })
+        }
+
+        if (statusConexao === 'conectado') {
+            return res.status(409).json({
+                sucesso: false,
+                erro: 'Bot já está conectado. Desconecte antes de solicitar novo pareamento.'
+            })
+        }
+
+        if (typeof sock.requestPairingCode !== 'function') {
+            return res.status(501).json({
+                sucesso: false,
+                erro: 'Versão atual do Baileys não suporta pareamento por código'
+            })
+        }
+
+        const codigo = await sock.requestPairingCode(numeroLimpo)
+
+        if (!codigo) {
+            return res.status(500).json({
+                sucesso: false,
+                erro: 'Não foi possível gerar código de pareamento'
+            })
+        }
+
+        return res.json({
+            sucesso: true,
+            codigo,
+            message: 'Código de pareamento gerado com sucesso'
+        })
+    } catch (erro) {
+        logger.error('[API] Erro ao gerar código de pareamento:', erro.message)
+        return res.status(500).json({
+            sucesso: false,
+            erro: erro.message || 'Erro interno ao gerar código de pareamento'
+        })
     }
 })
 
@@ -770,9 +870,12 @@ app.listen(PORTA, () => {
     logger.info(`[API]   GET  /        - Health check`)
     logger.info(`[API]   GET  /status  - Status da conexão`)
     logger.info(`[API]   GET  /qr      - QR Code para conexão`)
+    logger.info(`[API]   GET  /qrcode  - Alias de /qr`)
+    logger.info(`[API]   POST /parear-numero - Gera código de pareamento`)
     logger.info(`[API]   POST /enviar  - Enviar mensagem`)
     logger.info(`[API]   POST /atualizar-entregadores - Atualiza cache`)
     logger.info(`[API]   POST /desconectar - Desconecta o bot`)
+    logger.info(`[API]   Prefixo /api/* também é aceito`)
 
     // Inicia conexão WhatsApp
     iniciarConexaoWhatsApp()
