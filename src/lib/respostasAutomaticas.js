@@ -16,29 +16,13 @@
  */
 
 import { supabase } from './supabase.js'
+import { selecionarChavePixInteligente } from './pix.js'
 
 const LINK_SITE = 'https://reidochurrascobarras.com.br'
 const NOME_LOJA = 'Rei do Churrasco'
 
 // Timezone para cálculos de data/hora
 const TIMEZONE = 'America/Fortaleza'
-
-// Chaves PIX para alternância inteligente
-const CHAVES_PIX = [
-    {
-        tipo: 'Aleatória',
-        chave: '74849085-bf79-49ce-9897-95ccee2a3004',
-        titular: 'Rei do Churrasco'
-    },
-    {
-        tipo: 'E-mail',
-        chave: 'Marcos.f.alves1984@gmail.com',
-        titular: 'Rei do Churrasco'
-    }
-]
-
-// Controle de qual chave PIX foi enviada por último para cada número
-const ultimaChavePix = new Map()
 
 // Cache de configurações
 let configuracoesLoja = null
@@ -520,34 +504,6 @@ async function verificarLojaAbertaSupabase() {
 }
 
 /**
- * Seleciona uma chave PIX de forma inteligente.
- * Alterna entre as chaves para cada número, sem enviar as duas de uma vez.
- */
-function selecionarChavePix(numeroRemetente) {
-    const ultimaUsada = ultimaChavePix.get(numeroRemetente)
-
-    // Se nunca enviou para esse número, ou enviou a segunda, usa a primeira
-    let indice = 0
-    if (ultimaUsada === 0) {
-        indice = 1
-    }
-
-    // Atualiza o registro
-    ultimaChavePix.set(numeroRemetente, indice)
-
-    // Limpa entradas antigas (mais de 24h)
-    const agora = Date.now()
-    for (const [numero] of ultimaChavePix.entries()) {
-        // Sem timestamp aqui, mas como é um Map simples, limitamos ao tamanho
-        if (ultimaChavePix.size > 1000) {
-            ultimaChavePix.delete(numero)
-        }
-    }
-
-    return CHAVES_PIX[indice]
-}
-
-/**
  * Gera resposta de saudação com link do site
  * Inclui mensagem temática se for data especial
  */
@@ -588,7 +544,7 @@ O melhor churrasco da região! 🔥`
  */
 function gerarRespostaPix(numeroRemetente) {
     const saudacao = obterSaudacao()
-    const pixSelecionado = selecionarChavePix(numeroRemetente)
+    const pixSelecionado = selecionarChavePixInteligente(numeroRemetente)
 
     // Retorna array: primeira msg com info, segunda msg só com a chave para facilitar cópia
     return [

@@ -464,6 +464,7 @@ export function gerarMensagemCliente(pedido) {
     const listaItens = formatarItensPedido(pedido, false)
     const taxaEntrega = extrairTaxaEntrega(pedido)
     const contextoEntrega = obterContextoEntrega(pedido)
+    const formaPagamento = traduzirFormaPagamento(pedido.payment_method || pedido.forma_pagamento)
 
     let tipoEntrega = '🏪 Retirada no balcão'
     let infoEntregaCliente = ''
@@ -484,6 +485,14 @@ export function gerarMensagemCliente(pedido) {
     const total = pedido.total ? formatarMoeda(pedido.total) : ''
     const subtotal = pedido.subtotal ? formatarMoeda(pedido.subtotal) : ''
     const infoDesconto = formatarResumoDesconto(pedido)
+    let infoTroco = ''
+
+    if (pedido.valor_pago && pedido.valor_pago > pedido.total) {
+        const troco = pedido.valor_pago - pedido.total
+        infoTroco = `\n💵 *Troco para:* ${formatarMoeda(pedido.valor_pago)} (${formatarMoeda(troco)})`
+    } else if (pedido.troco && pedido.troco > 0) {
+        infoTroco = `\n💵 *Troco:* ${formatarMoeda(pedido.troco)}`
+    }
 
     let blocoValores = ''
     if (taxaEntrega > 0 && subtotal) {
@@ -506,6 +515,7 @@ ${listaItens}
 ${blocoValores}
 ${infoDesconto}
 *📦 Tipo:* ${tipoEntrega}${infoEntregaCliente}
+*💳 Pagamento:* ${formaPagamento}${infoTroco}
 
 ⏱️ *Tempo estimado: 30-45 minutos*
 

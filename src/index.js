@@ -29,6 +29,7 @@ import {
     gerarMensagemCliente,
     pedidoEhDelivery
 } from './lib/mensagens.js'
+import { selecionarChavePixInteligente } from './lib/pix.js'
 import { processarMensagemRecebida } from './lib/respostasAutomaticas.js'
 
 // Configurações
@@ -67,6 +68,19 @@ let estatisticas = {
     mensagensRecebidas: 0,
     mensagensEnviadas: 0,
     pedidosNotificados: 0
+}
+
+function normalizarTexto(valor) {
+    return String(valor || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+}
+
+function pedidoPagoComPix(pedido) {
+    const metodo = normalizarTexto(pedido?.payment_method || pedido?.forma_pagamento)
+    return metodo.includes('pix')
 }
 
 /**
@@ -174,6 +188,23 @@ async function processarNovoPedido(pedido) {
 
         if (enviadoCliente) {
             logger.info(`[BOT] ✅ Confirmação enviada para o cliente ${telefoneCLiente} - Pedido #${numeroPedido}`)
+
+            if (pedidoPagoComPix(pedido)) {
+                const chavePix = selecionarChavePixInteligente(telefoneCLiente)
+
+                const mensagemPix = `💳 *Pagamento PIX do Pedido #${numeroPedido}*\n\n` +
+                    `*Tipo:* ${chavePix.tipo}\n` +
+                    `*Titular:* ${chavePix.titular}\n\n` +
+                    `*Chave PIX:*\n${chavePix.chave}\n\n` +
+                    'Copie a chave acima para concluir o pagamento.'
+
+                const enviadoPix = await enviarMensagem(telefoneCLiente, mensagemPix)
+                if (enviadoPix) {
+                    logger.info(`[BOT] ✅ Chave PIX enviada para ${telefoneCLiente} - Pedido #${numeroPedido}`)
+                } else {
+                    logger.warn(`[BOT] ⚠️ Falha ao enviar chave PIX para ${telefoneCLiente} - Pedido #${numeroPedido}`)
+                }
+            }
         }
     }
 
