@@ -6,6 +6,9 @@
  */
 
 import 'dotenv/config'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 
 import {
     makeWASocket,
@@ -57,6 +60,15 @@ let estaAutenticado = false
 let tentativasReconexao = 0
 const MAX_TENTATIVAS_RECONEXAO = 5
 const DELAY_BASE_RECONEXAO_MS = 3000
+
+// Controle de confirmações de pedido já enviadas (evita duplicação)
+const confirmacoesEnviadasCliente = new Set()
+const MAX_CONFIRMACOES_CACHE = 200
+
+// Caminho do arquivo de lock para singleton
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const LOCK_FILE = path.resolve(__dirname, '..', 'bot.lock')
 
 // Cache de entregadores (atualizado a cada 5 minutos)
 let cacheEntregadores = []
@@ -160,8 +172,17 @@ async function enviarMensagem(telefone, mensagem) {
     }
 
     try {
+        // Efeito "digitando..." antes de enviar a mensagem
+        await sock.sendPresenceUpdate('composing', jid)
+        const delayDigitando = Math.min(Math.max(mensagem.length * 15, 1000), 3000)
+        await new Promise(resolve => setTimeout(resolve, delayDigitando))
+
         logger.info(`[BOT] Enviando para JID: ${jid}`)
         await sock.sendMessage(jid, { text: mensagem })
+
+        // Pausa o indicador de digitação após enviar
+        await sock.sendPresenceUpdate('paused', jid)
+
         estatisticas.mensagensEnviadas++
         logger.info(`[BOT] ✅ Mensagem enviada para ${jid}`)
         return true
@@ -180,6 +201,22 @@ async function enviarMensagem(telefone, mensagem) {
 async function processarNovoPedido(pedido) {
     const telefoneCLiente = pedido.customer_phone || pedido.telefone
     const numeroPedido = pedido.order_number || pedido.id?.slice(0, 8)
+
+    // Guarda contra confirmação duplicada — impede reenviar confirmação do mesmo pedido
+    if (confirmacoesEnviadasCliente.has(pedido.id)) {
+        logger.warn(`[BOT] ⚠️ Confirmação já enviada para pedido #${numeroPedido} (${pedido.id}), ignorando duplicata`)
+        return
+    }
+
+    // Marca como enviado ANTES de enviar (previne race conditions)
+    confirmacoesEnviadasCliente.add(pedido.id)
+
+    // Limpa cache se exceder limite (mantém apenas os mais recentes)
+    if (confirmacoesEnviadasCliente.size > MAX_CONFIRMACOES_CACHE) {
+        const idsArray = Array.from(confirmacoesEnviadasCliente)
+        const idsParaRemover = idsArray.slice(0, idsArray.length - MAX_CONFIRMACOES_CACHE)
+        idsParaRemover.forEach(id => confirmacoesEnviadasCliente.delete(id))
+    }
 
     // 1. Envia confirmação para o CLIENTE (prioridade)
     if (telefoneCLiente) {
@@ -633,14 +670,21 @@ async function iniciarConexaoWhatsApp() {
 
                 if (resposta) {
                     // Suporte a múltiplas mensagens (array) - ex: PIX envia chave separada para copiar
-                    const mensagens = Array.isArray(resposta) ? resposta : [resposta]
+                    const mensagensResposta = Array.isArray(resposta) ? resposta : [resposta]
+                    const jidRemetente = mensagem.key.remoteJid
 
-                    for (const msg of mensagens) {
-                        await sock.sendMessage(mensagem.key.remoteJid, { text: msg })
+                    for (const msg of mensagensResposta) {
+                        // Efeito "digitando..." antes de cada resposta automática
+                        await sock.sendPresenceUpdate('composing', jidRemetente)
+                        const delayDigitando = Math.min(Math.max(msg.length * 15, 1000), 3000)
+                        await new Promise(resolve => setTimeout(resolve, delayDigitando))
+
+                        await sock.sendMessage(jidRemetente, { text: msg })
+                        await sock.sendPresenceUpdate('paused', jidRemetente)
                         estatisticas.mensagensEnviadas++
 
                         // Pequeno delay entre mensagens múltiplas
-                        if (mensagens.length > 1) {
+                        if (mensagensResposta.length > 1) {
                             await new Promise(resolve => setTimeout(resolve, 500))
                         }
                     }
@@ -895,6 +939,65 @@ app.post('/desconectar', async (req, res) => {
     }
 })
 
+// =============== SINGLETON LOCK ===============
+
+/**
+ * Adquire lock exclusivo para impedir múltiplas instâncias do bot.
+ * Usa arquivo bot.lock com o PID do processo.
+ * Se o lock existir e o PID registrado estiver ativo, aborta.
+ */
+function adquirirLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            const pidExistente = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10)
+
+            // Verifica se o processo do lock ainda está rodando
+            if (pidExistente && !isNaN(pidExistente)) {
+                try {
+                    // signal 0 não mata o processo, apenas verifica se existe
+                    process.kill(pidExistente, 0)
+                    // Se chegou aqui, o processo existe — aborta
+                    logger.error(`[LOCK] ❌ Outra instância do bot já está rodando (PID: ${pidExistente})`)
+                    logger.error(`[LOCK] Encerre a instância anterior ou remova o arquivo ${LOCK_FILE}`)
+                    process.exit(1)
+                } catch {
+                    // process.kill lançou erro = processo não existe, lock é stale
+                    logger.warn(`[LOCK] Lock stale detectado (PID ${pidExistente} não existe), assumindo lock`)
+                }
+            }
+        }
+
+        // Cria/sobrescreve o lock com PID atual
+        fs.writeFileSync(LOCK_FILE, String(process.pid), 'utf-8')
+        logger.info(`[LOCK] ✅ Lock adquirido (PID: ${process.pid})`)
+        return true
+    } catch (erro) {
+        logger.error(`[LOCK] Erro ao adquirir lock: ${erro.message}`)
+        return false
+    }
+}
+
+/**
+ * Libera o lock ao encerrar o bot
+ */
+function liberarLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            const pidNoLock = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10)
+            // Só remove se o lock pertencer a este processo
+            if (pidNoLock === process.pid) {
+                fs.unlinkSync(LOCK_FILE)
+                logger.info(`[LOCK] Lock liberado (PID: ${process.pid})`)
+            }
+        }
+    } catch (erro) {
+        logger.warn(`[LOCK] Erro ao liberar lock: ${erro.message}`)
+    }
+}
+
+// Adquire lock antes de iniciar — impede múltiplas instâncias
+adquirirLock()
+
 // Inicia servidor
 app.listen(PORTA, () => {
     logger.info(`[API] Servidor rodando na porta ${PORTA}`)
@@ -918,6 +1021,7 @@ process.on('SIGINT', () => {
     logger.info('[BOT] Encerrando...')
     if (intervaloPolling) clearInterval(intervaloPolling)
     if (intervaloVerificacaoLoja) clearInterval(intervaloVerificacaoLoja)
+    liberarLock()
     process.exit(0)
 })
 
@@ -925,5 +1029,6 @@ process.on('SIGTERM', () => {
     logger.info('[BOT] Encerrando (SIGTERM)...')
     if (intervaloPolling) clearInterval(intervaloPolling)
     if (intervaloVerificacaoLoja) clearInterval(intervaloVerificacaoLoja)
+    liberarLock()
     process.exit(0)
 })
